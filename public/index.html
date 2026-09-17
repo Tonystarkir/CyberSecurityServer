@@ -1,12 +1,339 @@
 <!doctype html>
-<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Camera Demo</title></head>
-<body style="font-family:system-ui;max-width:600px;margin:30px auto;padding:15px">
+<html>
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Consent Camera Demo</title>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+  <style>
+    body {
+      font-family: system-ui;
+      max-width: 650px;
+      margin: 25px auto;
+      padding: 15px;
+    }
+
+    button {
+      padding: 12px 18px;
+      margin: 6px 3px;
+      cursor: pointer;
+    }
+
+    video {
+      width: 100%;
+      max-height: 400px;
+      background: #111;
+      margin-top: 15px;
+    }
+
+    #qr {
+      margin: 20px 0;
+    }
+
+    .box {
+      border: 1px solid #ccc;
+      padding: 15px;
+      margin-top: 20px;
+      border-radius: 10px;
+    }
+  </style>
+</head>
+
+<body>
+
 <h1>Consent-Based Camera Demo</h1>
-<p>The camera is never activated silently. The guest must provide explicit permission.</p>
-<button id="create">Create session</button><p id="out"></p>
+
+<p>
+  Camera access requires clear permission from the guest.
+  Sharing can be stopped at any time.
+</p>
+
+<div class="box">
+  <h2>Host</h2>
+
+  <button id="create">Create Session</button>
+
+  <p id="hostStatus"></p>
+  <p id="shareLink"></p>
+  <div id="qr"></div>
+
+  <video id="remoteVideo" autoplay playsinline></video>
+</div>
+
+<div class="box">
+  <h2>Guest</h2>
+
+  <p id="guestStatus"></p>
+
+  <button id="allowCamera">Allow Camera & Start</button>
+  <button id="takePhoto">Capture Photo</button>
+  <button id="stop">Stop Sharing</button>
+
+  <video id="localVideo" autoplay muted playsinline></video>
+
+  <canvas id="canvas" hidden></canvas>
+</div>
+
 <script>
-const ws = new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host);
-document.getElementById("create").onclick=()=>ws.send(JSON.stringify({type:"create-session"}));
-ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==="session-created")document.getElementById("out").textContent="Session ID: "+m.sessionId;};
+const ws = new WebSocket(
+  (location.protocol === "https:" ? "wss://" : "ws://") +
+  location.host
+);
+
+const createBtn = document.getElementById("create");
+const allowBtn = document.getElementById("allowCamera");
+const photoBtn = document.getElementById("takePhoto");
+const stopBtn = document.getElementById("stop");
+
+const hostStatus = document.getElementById("hostStatus");
+const guestStatus = document.getElementById("guestStatus");
+
+const localVideo = document.getElementById("localVideo");
+const remoteVideo = document.getElementById("remoteVideo");
+
+let sessionId = null;
+let role = null;
+let peer = null;
+let localStream = null;
+let photoChannel = null;
+
+function send(message) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(message));
+  }
+}
+
+function createPeer() {
+  peer = new RTCPeerConnection({
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" }
+    ]
+  });
+
+  peer.onicecandidate = event => {
+    if (event.candidate) {
+      send({
+        type: "ice-candidate",
+        candidate: event.candidate
+      });
+    }
+  };
+
+  peer.ontrack = event => {
+    remoteVideo.srcObject = event.streams[0];
+  };
+
+  peer.ondatachannel = event => {
+    photoChannel = event.channel;
+
+    photoChannel.onmessage = event => {
+      const blob = new Blob([event.data], {
+        type: "image/jpeg"
+      });
+
+      const url = URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "guest-photo.jpg";
+      link.textContent = "Download received photo";
+      document.body.appendChild(link);
+      document.body.appendChild(document.createElement("br"));
+    };
+  };
+
+  return peer;
+}
+
+// HOST CREATES SESSION
+createBtn.onclick = () => {
+  role = "host";
+  send({ type: "create-session" });
+};
+
+// HOST RECEIVES GUEST CONNECTION
+async function hostCreateOffer() {
+  createPeer();
+
+  photoChannel = peer.createDataChannel("photos");
+
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+
+  send({
+    type: "offer",
+    offer: offer
+  });
+}
+
+// GUEST STARTS CAMERA AFTER EXPLICIT ACTION
+allowBtn.onclick = async () => {
+  if (!sessionId) {
+    guestStatus.textContent = "Invalid or missing session.";
+    return;
+  }
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false
+    });
+
+    localVideo.srcObject = localStream;
+
+    createPeer();
+
+    localStream.getTracks().forEach(track => {
+      peer.addTrack(track, localStream);
+    });
+
+    send({ type: "consent-granted" });
+
+    guestStatus.textContent =
+      "Camera sharing started with your permission.";
+
+  } catch (error) {
+    guestStatus.textContent =
+      "Camera permission denied or unavailable.";
+  }
+};
+
+// CAPTURE PHOTO
+photoBtn.onclick = () => {
+  if (!localStream || !photoChannel) {
+    guestStatus.textContent =
+      "Start camera and wait for connection first.";
+    return;
+  }
+
+  const canvas = document.getElementById("canvas");
+  canvas.width = localVideo.videoWidth;
+  canvas.height = localVideo.videoHeight;
+
+  const context = canvas.getContext("2d");
+  context.drawImage(localVideo, 0, 0);
+
+  canvas.toBlob(blob => {
+    if (photoChannel.readyState === "open") {
+      blob.arrayBuffer().then(buffer => {
+        photoChannel.send(buffer);
+      });
+    }
+  }, "image/jpeg");
+
+  guestStatus.textContent = "Photo sent to host.";
+};
+
+// STOP SHARING
+stopBtn.onclick = () => {
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+
+  if (peer) {
+    peer.close();
+    peer = null;
+  }
+
+  send({ type: "stop-session" });
+
+  localVideo.srcObject = null;
+  guestStatus.textContent = "Sharing stopped.";
+};
+
+// WEBSOCKET EVENTS
+ws.onmessage = async event => {
+  const message = JSON.parse(event.data);
+
+  if (message.type === "session-created") {
+    sessionId = message.sessionId;
+
+    const link =
+      location.origin + "/?session=" +
+      encodeURIComponent(sessionId);
+
+    document.getElementById("shareLink").innerHTML =
+      "<b>Share this link:</b><br>" +
+      `<a href="${link}" target="_blank">${link}</a>`;
+
+    new QRCode(document.getElementById("qr"), {
+      text: link,
+      width: 220,
+      height: 220
+    });
+
+    hostStatus.textContent =
+      "Session created. Waiting for guest.";
+  }
+
+  if (message.type === "guest-joined") {
+    hostStatus.textContent = "Guest connected.";
+    await hostCreateOffer();
+  }
+
+  if (message.type === "consent-granted") {
+    hostStatus.textContent =
+      "Guest granted camera permission.";
+  }
+
+  if (message.type === "offer" && role === "guest") {
+    await peer.setRemoteDescription(message.offer);
+
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+
+    send({
+      type: "answer",
+      answer: answer
+    });
+  }
+
+  if (message.type === "answer" && role === "host") {
+    await peer.setRemoteDescription(message.answer);
+  }
+
+  if (message.type === "ice-candidate") {
+    if (peer) {
+      try {
+        await peer.addIceCandidate(message.candidate);
+      } catch (error) {
+        console.log("ICE error", error);
+      }
+    }
+  }
+
+  if (message.type === "peer-disconnected") {
+    hostStatus.textContent = "Guest disconnected.";
+    guestStatus.textContent = "Host disconnected.";
+  }
+
+  if (message.type === "session-expired") {
+    hostStatus.textContent = "Session expired.";
+    guestStatus.textContent = "Session expired.";
+  }
+};
+
+// AUTOMATICALLY JOIN USING LINK
+const params = new URLSearchParams(location.search);
+const sharedSession = params.get("session");
+
+if (sharedSession) {
+  role = "guest";
+  sessionId = sharedSession;
+
+  guestStatus.textContent =
+    "You are joining a camera session. Start only if you agree.";
+
+  ws.addEventListener("open", () => {
+    send({
+      type: "join-session",
+      sessionId: sessionId
+    });
+  });
+}
 </script>
-</body></html>
+
+</body>
+</html>
