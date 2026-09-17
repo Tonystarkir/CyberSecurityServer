@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Camera Demo</title></head>
+<body style="font-family:system-ui;max-width:600px;margin:30px auto;padding:15px">
+<h1>Consent-Based Camera Demo</h1>
+<p>The camera is never activated silently. The guest must provide explicit permission.</p>
+<button id="create">Create session</button><p id="out"></p>
+<script>
+const ws = new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host);
+document.getElementById("create").onclick=()=>ws.send(JSON.stringify({type:"create-session"}));
+ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==="session-created")document.getElementById("out").textContent="Session ID: "+m.sessionId;};
+</script>
+</body></html>
